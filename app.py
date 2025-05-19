@@ -22,7 +22,10 @@ def update_homepage():
     theme_id = main_theme['id']
 
     # Get homepage layout (index.json)
-    asset = requests.get(f"https://{SHOP_URL}/admin/api/2024-01/themes/{theme_id}/assets.json?asset[key]=sections/index.json", headers=HEADERS).json()
+    asset = requests.get(
+        f"https://{SHOP_URL}/admin/api/2024-01/themes/{theme_id}/assets.json?asset[key]=sections/index.json",
+        headers=HEADERS
+    ).json()
     homepage = asset['asset']['value']
 
     # Replace welcome message with new text
@@ -41,9 +44,6 @@ def update_homepage():
     )
     return jsonify({"status": "updated"}), resp.status_code
 
-@app.route('/', methods=['GET'])
-def root():
-    return "DIG CLOTHING CO. Agent Active", 200
-
 if __name__ == '__main__':
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
