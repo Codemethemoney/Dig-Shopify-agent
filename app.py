@@ -1,17 +1,26 @@
 import os
 import json
+import logging
+from flask import Flask, request, jsonify, session
+from dotenv import load_dotenv
 import shopify
-from flask import Flask, request, jsonify, session, redirect, url_for
+
+# Load environment variables
+load_dotenv()
+
+# Set up logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key')
 
 # Shopify API credentials
-API_KEY = '8622868c827cd8a022509cf274b9e0ab'
-API_SECRET = '7e657964344db9c2470e102bc8a5567e'
-SHOP_NAME = 'digclothingko.myshopify.com'
+API_KEY = os.environ.get('SHOPIFY_API_KEY')
+API_SECRET = os.environ.get('SHOPIFY_API_SECRET')
+SHOP_NAME = os.environ.get('SHOPIFY_DOMAIN')
 API_VERSION = '2023-10'
-SHOPIFY_ACCESS_TOKEN = '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'
+SHOPIFY_ACCESS_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN')
 
 # Initialize Shopify API
 shopify.Session.setup(api_key=API_KEY, secret=API_SECRET)
@@ -59,7 +68,7 @@ def get_homepage_asset(shop, token, theme_id):
             'content': content
         }
     except Exception as e1:
-        print(f"Error fetching settings_data.json: {str(e1)}")
+        logger.error(f"Error fetching settings_data.json: {str(e1)}")
         
         # Second attempt: Try templates/index.json (OS 2.0)
         try:
@@ -71,7 +80,7 @@ def get_homepage_asset(shop, token, theme_id):
                 'content': content
             }
         except Exception as e2:
-            print(f"Error fetching templates/index.json: {str(e2)}")
+            logger.error(f"Error fetching templates/index.json: {str(e2)}")
             
             # Third attempt: sections/index.json (legacy)
             try:
@@ -83,7 +92,7 @@ def get_homepage_asset(shop, token, theme_id):
                     'content': content
                 }
             except Exception as e3:
-                print(f"Error fetching sections/index.json: {str(e3)}")
+                logger.error(f"Error fetching sections/index.json: {str(e3)}")
                 raise Exception(f"Failed to fetch homepage asset: {str(e3)}")
 
 @app.route('/update-homepage', methods=['POST'])
@@ -95,6 +104,7 @@ def update_homepage():
             return jsonify({'success': False, 'error': 'Missing required text parameter'}), 400
             
         new_headline = data['text']
+        logger.info(f"Received request to update headline to: {new_headline}")
         
         # Get shop and token
         shop, token = get_shop_and_token()
@@ -102,50 +112,74 @@ def update_homepage():
         # Get the main theme
         main_theme = get_main_theme(shop, token)
         if not main_theme:
+            logger.error("No main theme found")
             return jsonify({'success': False, 'error': 'No main theme found'}), 404
             
+        logger.info(f"Found main theme: {main_theme.name} (ID: {main_theme.id})")
+        
         # Get homepage asset
         result = get_homepage_asset(shop, token, main_theme.id)
+        logger.info(f"Retrieved asset of type: {result['type']}")
         
         # Update headline based on asset type
         if result['type'] == 'settings_data':
             # Update brand_headline in settings_data.json
             content = result['content']
-            if 'current' in content and 'brand_headline' in content['current']:
-                content['current']['brand_headline'] = new_headline
+            
+            # FIXED CODE: Check if 'current' is a string (preset name) or a dictionary
+            if 'current' in content:
+                if isinstance(content['current'], str):
+                    # If 'current' is a string, we need to update the value in the preset
+                    preset_name = content['current']
+                    logger.info(f"Current is a string, preset name: {preset_name}")
+                    if 'presets' in content and preset_name in content['presets']:
+                        logger.info(f"Updating brand_headline in preset: {preset_name}")
+                        content['presets'][preset_name]['brand_headline'] = new_headline
+                else:
+                    # If 'current' is already a dictionary, update directly
+                    logger.info("Current is a dictionary, updating brand_headline directly")
+                    content['current']['brand_headline'] = new_headline
             else:
-                # If the structure is different, add brand_headline to current
-                if 'current' not in content:
-                    content['current'] = {}
-                content['current']['brand_headline'] = new_headline
+                # If neither structure exists, create it
+                logger.info("No current field found, creating one")
+                content['current'] = {'brand_headline': new_headline}
                 
         elif result['type'] == 'templates_index':
             # Update headline in the template sections
             content = result['content']
+            updated = False
             for section_id, section in content.get('sections', {}).items():
                 if section.get('type') in ['image-banner', 'hero', 'slideshow']:
                     if 'settings' not in section:
                         section['settings'] = {}
+                    logger.info(f"Updating heading in section: {section_id}")
                     section['settings']['heading'] = new_headline
+                    updated = True
                     break
+            
+            if not updated:
+                logger.warning("No suitable section found to update heading")
                     
         elif result['type'] == 'sections_index':
             # Update headline in the section settings
             content = result['content']
             if 'settings' not in content:
                 content['settings'] = {}
+            logger.info("Updating heading in sections_index.json")
             content['settings']['heading'] = new_headline
             
         # Save the updated content
         asset = result['asset']
         asset.value = json.dumps(content)
         asset.save()
+        logger.info("Asset saved successfully")
         
         return jsonify({'success': True})
         
     except Exception as e:
-        print(f"Error updating homepage: {str(e)}")
-        return jsonify({'success': False, 'error': str(e)}), 500
+        error_msg = str(e)
+        logger.error(f"Error updating homepage: {error_msg}")
+        return jsonify({'success': False, 'error': error_msg}), 500
 
 @app.route('/debug-settings', methods=['GET'])
 def debug_settings():
@@ -200,8 +234,45 @@ def debug_settings():
         return jsonify(debug_info)
         
     except Exception as e:
-        print(f"Error in debug endpoint: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        error_msg = str(e)
+        logger.error(f"Error in debug endpoint: {error_msg}")
+        return jsonify({'error': error_msg}), 500
+
+@app.route('/update-theme', methods=['POST'])
+def update_theme():
+    """General-purpose theme update endpoint for various operations"""
+    try:
+        data = request.get_json()
+        
+        # Validate required fields
+        if not data or 'operation' not in data:
+            return jsonify({'success': False, 'error': 'Missing operation parameter'}), 400
+            
+        operation = data['operation']
+        logger.info(f"Received theme update request, operation: {operation}")
+        
+        # Handle different operation types
+        if operation == 'update_headline':
+            # Reuse existing logic
+            return update_homepage()
+        elif operation == 'update_description':
+            # Example for modifying brand description
+            if 'text' not in data:
+                return jsonify({'success': False, 'error': 'Missing text parameter'}), 400
+                
+            # Handle description update logic here
+            return jsonify({'success': True, 'message': 'Feature not yet implemented'}), 501
+        elif operation == 'update_color_scheme':
+            # Example for modifying color scheme
+            return jsonify({'success': True, 'message': 'Feature not yet implemented'}), 501
+        else:
+            return jsonify({'success': False, 'error': f'Unknown operation: {operation}'}), 400
+            
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Error in update-theme endpoint: {error_msg}")
+        return jsonify({'success': False, 'error': error_msg}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+    port = int(os.environ.get('PORT', 8080))
+    app.run(debug=True, host='0.0.0.0', port=port)
