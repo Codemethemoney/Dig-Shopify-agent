@@ -1,4 +1,2 @@
 Flask==2.3.2
 requests==2.31.0
-shopify_api
-python-dotenv==1.0.0
