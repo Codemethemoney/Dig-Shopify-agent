@@ -1,99 +1,71 @@
 import os
 import json
-import logging
+import requests
 from flask import Flask, request, jsonify, session
-from dotenv import load_dotenv
-import shopify
-
-# Load environment variables
-load_dotenv()
-
-# Set up logging
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key')
 
-# Shopify API credentials
-API_KEY = os.environ.get('SHOPIFY_API_KEY')
-API_SECRET = os.environ.get('SHOPIFY_API_SECRET')
+# Get credentials from environment
 SHOP_NAME = os.environ.get('SHOPIFY_DOMAIN')
+ACCESS_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN')
 API_VERSION = '2023-10'
-SHOPIFY_ACCESS_TOKEN = os.environ.get('SHOPIFY_ACCESS_TOKEN')
-
-# Initialize Shopify API
-shopify.Session.setup(api_key=API_KEY, secret=API_SECRET)
 
 @app.route('/')
 def index():
     return "DIG Shopify Agent - Homepage Editor is running!"
 
-def get_shop_and_token():
-    """Helper function to get shop name and access token from session"""
-    shop = session.get('shop', SHOP_NAME)
-    token = session.get('access_token')
+def get_main_theme():
+    """Get the active theme ID using direct API call"""
+    url = f"https://{SHOP_NAME}/admin/api/{API_VERSION}/themes.json"
+    headers = {
+        "X-Shopify-Access-Token": ACCESS_TOKEN,
+        "Content-Type": "application/json"
+    }
     
-    if not token:
-        # For simplicity, using a predefined token
-        token = SHOPIFY_ACCESS_TOKEN
-        session['access_token'] = token
+    response = requests.get(url, headers=headers)
+    if response.status_code != 200:
+        raise Exception(f"Failed to get themes: {response.text}")
         
-    return shop, token
-
-def get_shopify_session(shop, token):
-    """Create and activate a Shopify session"""
-    shopify_session = shopify.Session(shop, API_VERSION, token)
-    shopify.ShopifyResource.activate_session(shopify_session)
-    return shopify_session
-
-def get_main_theme(shop, token):
-    """Get the active theme ID"""
-    get_shopify_session(shop, token)
-    themes = shopify.Theme.find()
-    main_theme = next((theme for theme in themes if theme.role == 'main'), None)
+    themes = response.json().get('themes', [])
+    main_theme = next((theme for theme in themes if theme.get('role') == 'main'), None)
     return main_theme
 
-def get_homepage_asset(shop, token, theme_id):
-    """Fetch homepage asset with fallback mechanism"""
-    get_shopify_session(shop, token)
+def get_asset(theme_id, key):
+    """Get an asset from the theme"""
+    url = f"https://{SHOP_NAME}/admin/api/{API_VERSION}/themes/{theme_id}/assets.json"
+    params = {"asset[key]": key}
+    headers = {
+        "X-Shopify-Access-Token": ACCESS_TOKEN,
+        "Content-Type": "application/json"
+    }
     
-    # First attempt: Modern themes - config/settings_data.json
-    try:
-        asset = shopify.Asset.find('config/settings_data.json', theme_id=theme_id)
-        content = json.loads(asset.value)
-        return {
-            'type': 'settings_data',
-            'asset': asset,
-            'content': content
-        }
-    except Exception as e1:
-        logger.error(f"Error fetching settings_data.json: {str(e1)}")
+    response = requests.get(url, headers=headers, params=params)
+    if response.status_code != 200:
+        raise Exception(f"Failed to get asset {key}: {response.text}")
         
-        # Second attempt: Try templates/index.json (OS 2.0)
-        try:
-            asset = shopify.Asset.find('templates/index.json', theme_id=theme_id)
-            content = json.loads(asset.value)
-            return {
-                'type': 'templates_index',
-                'asset': asset,
-                'content': content
-            }
-        except Exception as e2:
-            logger.error(f"Error fetching templates/index.json: {str(e2)}")
-            
-            # Third attempt: sections/index.json (legacy)
-            try:
-                asset = shopify.Asset.find('sections/index.json', theme_id=theme_id)
-                content = json.loads(asset.value)
-                return {
-                    'type': 'sections_index',
-                    'asset': asset,
-                    'content': content
-                }
-            except Exception as e3:
-                logger.error(f"Error fetching sections/index.json: {str(e3)}")
-                raise Exception(f"Failed to fetch homepage asset: {str(e3)}")
+    return response.json().get('asset', {})
+
+def update_asset(theme_id, key, value):
+    """Update an asset in the theme"""
+    url = f"https://{SHOP_NAME}/admin/api/{API_VERSION}/themes/{theme_id}/assets.json"
+    headers = {
+        "X-Shopify-Access-Token": ACCESS_TOKEN,
+        "Content-Type": "application/json"
+    }
+    
+    data = {
+        "asset": {
+            "key": key,
+            "value": value
+        }
+    }
+    
+    response = requests.put(url, headers=headers, json=data)
+    if response.status_code != 200:
+        raise Exception(f"Failed to update asset {key}: {response.text}")
+        
+    return response.json().get('asset', {})
 
 @app.route('/update-homepage', methods=['POST'])
 def update_homepage():
@@ -104,112 +76,85 @@ def update_homepage():
             return jsonify({'success': False, 'error': 'Missing required text parameter'}), 400
             
         new_headline = data['text']
-        logger.info(f"Received request to update headline to: {new_headline}")
-        
-        # Get shop and token
-        shop, token = get_shop_and_token()
+        print(f"Received request to update headline to: {new_headline}")
         
         # Get the main theme
-        main_theme = get_main_theme(shop, token)
+        main_theme = get_main_theme()
         if not main_theme:
-            logger.error("No main theme found")
             return jsonify({'success': False, 'error': 'No main theme found'}), 404
             
-        logger.info(f"Found main theme: {main_theme.name} (ID: {main_theme.id})")
+        theme_id = main_theme.get('id')
+        print(f"Found main theme: {main_theme.get('name')} (ID: {theme_id})")
         
-        # Get homepage asset
-        result = get_homepage_asset(shop, token, main_theme.id)
-        logger.info(f"Retrieved asset of type: {result['type']}")
-        
-        # Update headline based on asset type
-        if result['type'] == 'settings_data':
-            # Update brand_headline in settings_data.json
-            content = result['content']
+        # Get settings_data.json
+        asset = get_asset(theme_id, 'config/settings_data.json')
+        if not asset or 'value' not in asset:
+            return jsonify({'success': False, 'error': 'Failed to get settings_data.json'}), 500
             
-            # FIXED CODE: Check if 'current' is a string (preset name) or a dictionary
-            if 'current' in content:
-                if isinstance(content['current'], str):
-                    # If 'current' is a string, we need to update the value in the preset
-                    preset_name = content['current']
-                    logger.info(f"Current is a string, preset name: {preset_name}")
-                    if 'presets' in content and preset_name in content['presets']:
-                        logger.info(f"Updating brand_headline in preset: {preset_name}")
-                        content['presets'][preset_name]['brand_headline'] = new_headline
-                else:
-                    # If 'current' is already a dictionary, update directly
-                    logger.info("Current is a dictionary, updating brand_headline directly")
-                    content['current']['brand_headline'] = new_headline
+        # Parse the content
+        content = json.loads(asset['value'])
+        
+        # Check the structure of settings_data.json
+        if 'current' in content:
+            if isinstance(content['current'], str):
+                # 'current' is a string, update the preset
+                preset_name = content['current']
+                print(f"Current is a string, preset name: {preset_name}")
+                if 'presets' in content and preset_name in content['presets']:
+                    print(f"Updating brand_headline in preset: {preset_name}")
+                    content['presets'][preset_name]['brand_headline'] = new_headline
             else:
-                # If neither structure exists, create it
-                logger.info("No current field found, creating one")
-                content['current'] = {'brand_headline': new_headline}
-                
-        elif result['type'] == 'templates_index':
-            # Update headline in the template sections
-            content = result['content']
-            updated = False
-            for section_id, section in content.get('sections', {}).items():
-                if section.get('type') in ['image-banner', 'hero', 'slideshow']:
-                    if 'settings' not in section:
-                        section['settings'] = {}
-                    logger.info(f"Updating heading in section: {section_id}")
-                    section['settings']['heading'] = new_headline
-                    updated = True
-                    break
+                # 'current' is a dictionary, update directly
+                print("Current is a dictionary, updating brand_headline directly")
+                content['current']['brand_headline'] = new_headline
+        else:
+            # Neither structure exists, create it
+            print("No current field found, creating one")
+            content['current'] = {'brand_headline': new_headline}
             
-            if not updated:
-                logger.warning("No suitable section found to update heading")
-                    
-        elif result['type'] == 'sections_index':
-            # Update headline in the section settings
-            content = result['content']
-            if 'settings' not in content:
-                content['settings'] = {}
-            logger.info("Updating heading in sections_index.json")
-            content['settings']['heading'] = new_headline
-            
-        # Save the updated content
-        asset = result['asset']
-        asset.value = json.dumps(content)
-        asset.save()
-        logger.info("Asset saved successfully")
+        # Update the asset
+        update_asset(theme_id, 'config/settings_data.json', json.dumps(content))
+        print("Asset saved successfully")
         
         return jsonify({'success': True})
         
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error updating homepage: {error_msg}")
+        print(f"Error updating homepage: {error_msg}")
         return jsonify({'success': False, 'error': error_msg}), 500
 
 @app.route('/debug-settings', methods=['GET'])
 def debug_settings():
     """A debug route to inspect theme settings and structure"""
     try:
-        shop, token = get_shop_and_token()
-        main_theme = get_main_theme(shop, token)
+        main_theme = get_main_theme()
         
         if not main_theme:
             return jsonify({'error': 'No main theme found'}), 404
             
-        debug_info = {
-            'theme_info': {
-                'id': main_theme.id,
-                'name': main_theme.name,
-                'role': main_theme.role
-            },
-            'available_assets': [],
-            'settings_data': None,
-            'templates_index': None,
-            'sections_index': None
+        theme_id = main_theme.get('id')
+        
+        # Get theme assets list
+        url = f"https://{SHOP_NAME}/admin/api/{API_VERSION}/themes/{theme_id}/assets.json"
+        headers = {
+            "X-Shopify-Access-Token": ACCESS_TOKEN,
+            "Content-Type": "application/json"
         }
         
-        # Get theme assets
-        get_shopify_session(shop, token)
-        assets = shopify.Asset.find(theme_id=main_theme.id)
-        debug_info['available_assets'] = [asset.key for asset in assets if 
-                                       'json' in asset.key or 
-                                       'index' in asset.key or 
-                                       'config' in asset.key]
+        response = requests.get(url, headers=headers)
+        if response.status_code != 200:
+            raise Exception(f"Failed to get assets: {response.text}")
+            
+        assets = response.json().get('assets', [])
+        
+        debug_info = {
+            'theme_info': {
+                'id': theme_id,
+                'name': main_theme.get('name'),
+                'role': main_theme.get('role')
+            },
+            'available_assets': [asset.get('key') for asset in assets if '.json' in asset.get('key', '')]
+        }
         
         # Check specific files
         paths = [
@@ -220,13 +165,15 @@ def debug_settings():
         
         for path in paths:
             try:
-                asset = shopify.Asset.find(path, theme_id=main_theme.id)
-                path_key = path.replace('/', '_').replace('.', '_')
-                debug_info[path_key] = {
-                    'exists': True,
-                    'sample': json.loads(asset.value)
-                }
+                asset = get_asset(theme_id, path)
+                if 'value' in asset:
+                    path_key = path.replace('/', '_').replace('.', '_')
+                    debug_info[path_key] = {
+                        'exists': True,
+                        'sample': json.loads(asset['value'])
+                    }
             except:
+                path_key = path.replace('/', '_').replace('.', '_')
                 debug_info[path_key] = {
                     'exists': False
                 }
@@ -235,43 +182,8 @@ def debug_settings():
         
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error in debug endpoint: {error_msg}")
+        print(f"Error in debug endpoint: {error_msg}")
         return jsonify({'error': error_msg}), 500
-
-@app.route('/update-theme', methods=['POST'])
-def update_theme():
-    """General-purpose theme update endpoint for various operations"""
-    try:
-        data = request.get_json()
-        
-        # Validate required fields
-        if not data or 'operation' not in data:
-            return jsonify({'success': False, 'error': 'Missing operation parameter'}), 400
-            
-        operation = data['operation']
-        logger.info(f"Received theme update request, operation: {operation}")
-        
-        # Handle different operation types
-        if operation == 'update_headline':
-            # Reuse existing logic
-            return update_homepage()
-        elif operation == 'update_description':
-            # Example for modifying brand description
-            if 'text' not in data:
-                return jsonify({'success': False, 'error': 'Missing text parameter'}), 400
-                
-            # Handle description update logic here
-            return jsonify({'success': True, 'message': 'Feature not yet implemented'}), 501
-        elif operation == 'update_color_scheme':
-            # Example for modifying color scheme
-            return jsonify({'success': True, 'message': 'Feature not yet implemented'}), 501
-        else:
-            return jsonify({'success': False, 'error': f'Unknown operation: {operation}'}), 400
-            
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"Error in update-theme endpoint: {error_msg}")
-        return jsonify({'success': False, 'error': error_msg}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
